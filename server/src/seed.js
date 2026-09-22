@@ -58,20 +58,57 @@ const recentWorkSchema = new mongoose.Schema({
 const departmentSchema = new mongoose.Schema({ name: String, code: String, agency: String, active: Boolean }, { timestamps: true })
 const fieldTeamSchema = new mongoose.Schema({ name: String, department: mongoose.Schema.Types.ObjectId, lead: mongoose.Schema.Types.ObjectId, ward: String, active: Boolean }, { timestamps: true })
 
+const incidentSchema = new mongoose.Schema({
+  incidentId: String,
+  type: String,
+  title: String,
+  description: String,
+  roadName: String,
+  location: { type: { type: String, default: 'Point' }, coordinates: [Number] },
+  severity: String,
+  status: String,
+  radius: Number,
+  startTime: Date,
+  endTime: Date,
+  createdBy: mongoose.Schema.Types.ObjectId,
+  eventName: String,
+  expectedVisitors: Number,
+  congestionLevel: String,
+  sourceIssueId: mongoose.Schema.Types.ObjectId,
+  isSimulation: Boolean
+}, { timestamps: true })
+
+const parkingSchema = new mongoose.Schema({
+  parkingId: String,
+  name: String,
+  location: { type: { type: String, default: 'Point' }, coordinates: [Number] },
+  address: String,
+  capacity: Number,
+  availableSpaces: Number,
+  status: String,
+  nearLandmark: String
+}, { timestamps: true })
+
 issueSchema.index({ location: '2dsphere' })
 recentWorkSchema.index({ location: '2dsphere' })
+incidentSchema.index({ location: '2dsphere' })
+parkingSchema.index({ location: '2dsphere' })
 
 const User = mongoose.model('User', userSchema)
 const Issue = mongoose.model('Issue', issueSchema)
 const RecentWork = mongoose.model('RecentWork', recentWorkSchema)
 const Department = mongoose.model('Department', departmentSchema)
 const FieldTeam = mongoose.model('FieldTeam', fieldTeamSchema)
+const Incident = mongoose.model('Incident', incidentSchema)
+const Parking = mongoose.model('Parking', parkingSchema)
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/civicpulse'
 await mongoose.connect(mongoUri)
 console.log(`Connected to MongoDB for seeding: ${mongoUri}`)
 await Issue.createIndexes()
 await RecentWork.createIndexes()
+await Incident.createIndexes()
+await Parking.createIndexes()
 
 const password = await bcrypt.hash('CivicPulse2026!', 12)
 const authorityPassword = await bcrypt.hash('admin', 12)
@@ -333,7 +370,105 @@ await Issue.insertMany([
   }
 ])
 
-console.log('✅ Nagpur Urban Infrastructure Seed data successfully inserted!')
+// Seed Dynamic Incident-Aware Routing: Initial Incidents for 3 Hackathon Scenarios
+await Incident.deleteMany({})
+await Incident.insertMany([
+  {
+    incidentId: 'INC-NGP-01',
+    type: 'ROAD_CLOSURE',
+    title: 'Wardha Flyover Closed for Structural Expansion',
+    description: 'Structural inspection and girder repair on Wardha Road Flyover. Carriageway closed between Ajni and Chhatrapati Square. Normal traffic redirected to outer corridors.',
+    roadName: 'Wardha Road Flyover Corridor',
+    location: { type: 'Point', coordinates: [79.0750, 21.1120] },
+    severity: 'CRITICAL',
+    status: 'ACTIVE',
+    radius: 450,
+    startTime: now,
+    endTime: new Date(now.getTime() + 48 * 60 * 60 * 1000),
+    createdBy: users[1]._id,
+    isSimulation: false
+  },
+  {
+    incidentId: 'INC-NGP-02',
+    type: 'FLOODED_ROAD',
+    title: 'Manish Nagar Railway Underpass Flooded',
+    description: 'Heavy monsoon cloudburst submerged underpass with 2.5ft of standing water. Danger of engine hydro-lock. Road marked as blocked/unsafe for all vehicular transit.',
+    roadName: 'Manish Nagar Railway Underpass Road',
+    location: { type: 'Point', coordinates: [79.0815, 21.0995] },
+    severity: 'HIGH',
+    status: 'ACTIVE',
+    radius: 380,
+    startTime: now,
+    endTime: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+    createdBy: users[1]._id,
+    isSimulation: false
+  },
+  {
+    incidentId: 'INC-NGP-03',
+    type: 'EVENT_CONGESTION',
+    title: 'Annual Mega Gathering at Deekshabhoomi',
+    description: 'High-density cultural gathering with over 25,000 expected pilgrims. Surrounding radius closed to private vehicular transit; traffic routed to designated perimeter parking hubs.',
+    roadName: 'Deekshabhoomi Perimeter & South Ambazari Road',
+    location: { type: 'Point', coordinates: [79.0689, 21.1278] },
+    severity: 'HIGH',
+    status: 'ACTIVE',
+    radius: 800,
+    startTime: now,
+    endTime: new Date(now.getTime() + 72 * 60 * 60 * 1000),
+    eventName: 'Deekshabhoomi Mahotsav',
+    expectedVisitors: 25000,
+    congestionLevel: 'HIGH',
+    createdBy: users[1]._id,
+    isSimulation: false
+  }
+])
+
+// Seed Event Parking Guidance Locations
+await Parking.deleteMany({})
+await Parking.insertMany([
+  {
+    parkingId: 'PRK-NGP-01',
+    name: 'Deekshabhoomi North Gate Multi-Level Parking',
+    location: { type: 'Point', coordinates: [79.0682, 21.1292] },
+    address: 'North Gate Entrance, Deekshabhoomi, Nagpur',
+    capacity: 500,
+    availableSpaces: 124,
+    status: 'OPEN',
+    nearLandmark: 'Deekshabhoomi'
+  },
+  {
+    parkingId: 'PRK-NGP-02',
+    name: 'Laxmi Nagar Ground Event Parking Hub',
+    location: { type: 'Point', coordinates: [79.0665, 21.1225] },
+    address: 'Municipal Sports Ground, Laxmi Nagar, Nagpur',
+    capacity: 300,
+    availableSpaces: 78,
+    status: 'OPEN',
+    nearLandmark: 'Deekshabhoomi / Laxmi Nagar'
+  },
+  {
+    parkingId: 'PRK-NGP-03',
+    name: 'Ramdaspeth South Municipal Lot',
+    location: { type: 'Point', coordinates: [79.0740, 21.1350] },
+    address: 'Central Bazar Road, Ramdaspeth, Nagpur',
+    capacity: 250,
+    availableSpaces: 42,
+    status: 'OPEN',
+    nearLandmark: 'Ramdaspeth'
+  },
+  {
+    parkingId: 'PRK-NGP-04',
+    name: 'Airport Long-Stay Transit Parking',
+    location: { type: 'Point', coordinates: [79.0610, 21.0915] },
+    address: 'Terminal Approach Road, Sonegaon, Nagpur',
+    capacity: 400,
+    availableSpaces: 185,
+    status: 'OPEN',
+    nearLandmark: 'Airport'
+  }
+])
+
+console.log('✅ Nagpur Urban Infrastructure & Dynamic Routing Seed data successfully inserted!')
 console.log('Credentials:')
 console.log('  Citizen: citizen@demo.com / CivicPulse2026!')
 console.log('  Authority: authority@demo.com / admin')

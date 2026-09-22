@@ -150,12 +150,70 @@ const fieldTeamSchema = new mongoose.Schema({
   active: { type: Boolean, default: true }
 }, { timestamps: true })
 
+// Dynamic Incident-Aware Routing Schemas
+const incidentSchema = new mongoose.Schema({
+  incidentId: { type: String, unique: true },
+  type: {
+    type: String,
+    enum: ['ROAD_CLOSURE', 'FLOODED_ROAD', 'ACCIDENT', 'EVENT_CONGESTION'],
+    default: 'ROAD_CLOSURE'
+  },
+  title: { type: String, required: true },
+  description: String,
+  roadName: String,
+  location: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], required: true } // [lng, lat]
+  },
+  severity: {
+    type: String,
+    enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+    default: 'HIGH'
+  },
+  status: {
+    type: String,
+    enum: ['ACTIVE', 'RESOLVED', 'SCHEDULED'],
+    default: 'ACTIVE'
+  },
+  radius: { type: Number, default: 350 }, // affected area radius in meters
+  startTime: { type: Date, default: Date.now },
+  endTime: Date,
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  eventName: String,
+  expectedVisitors: Number,
+  congestionLevel: {
+    type: String,
+    enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+    default: 'HIGH'
+  },
+  sourceIssueId: { type: mongoose.Schema.Types.ObjectId, ref: 'Issue' },
+  isSimulation: { type: Boolean, default: false }
+}, { timestamps: true })
+incidentSchema.index({ location: '2dsphere' })
+
+const parkingSchema = new mongoose.Schema({
+  parkingId: { type: String, unique: true },
+  name: { type: String, required: true },
+  location: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], required: true } // [lng, lat]
+  },
+  address: String,
+  capacity: { type: Number, default: 200 },
+  availableSpaces: { type: Number, default: 50 },
+  status: { type: String, enum: ['OPEN', 'FULL', 'CLOSED'], default: 'OPEN' },
+  nearLandmark: String
+}, { timestamps: true })
+parkingSchema.index({ location: '2dsphere' })
+
 const User = mongoose.model('User', userSchema)
 const Issue = mongoose.model('Issue', issueSchema)
 const RecentWork = mongoose.model('RecentWork', recentWorkSchema)
 const Notification = mongoose.model('Notification', notificationSchema)
 const Department = mongoose.model('Department', departmentSchema)
 const FieldTeam = mongoose.model('FieldTeam', fieldTeamSchema)
+const Incident = mongoose.model('Incident', incidentSchema)
+const Parking = mongoose.model('Parking', parkingSchema)
 
 // Helpers
 const tokenFor = (user) => jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET || 'dev-only-secret', { expiresIn: '7d' })
@@ -569,6 +627,320 @@ app.post('/api/recent-works', auth, async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
+// ==========================================
+// DYNAMIC INCIDENT-AWARE ROUTING API ROUTES
+// ==========================================
+
+// Get All Incidents (supports optional filtering by status/type)
+app.get('/api/incidents', async (req, res, next) => {
+  try {
+    const { status, type } = req.query
+    const query = {}
+    if (status) query.status = status
+    if (type) query.type = type
+    const incidents = await Incident.find(query).sort({ createdAt: -1 }).populate('createdBy', 'name role')
+    res.json(incidents)
+  } catch (error) { next(error) }
+})
+
+// Get Active Incidents (for map layers, live citizen alerts & routing)
+app.get('/api/incidents/active', async (req, res, next) => {
+  try {
+    const incidents = await Incident.find({ status: 'ACTIVE' }).sort({ severity: -1, createdAt: -1 })
+    res.json(incidents)
+  } catch (error) { next(error) }
+})
+
+// Create Road Incident (Authority/Admin only)
+app.post('/api/incidents', auth, async (req, res, next) => {
+  try {
+    if (!['AUTHORITY', 'ADMIN'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Authority or Admin access required to create road incidents' })
+    }
+    const {
+      type = 'ROAD_CLOSURE',
+      title,
+      description,
+      roadName,
+      location,
+      latitude,
+      longitude,
+      severity = 'HIGH',
+      status = 'ACTIVE',
+      radius = 350,
+      startTime = new Date(),
+      endTime,
+      eventName,
+      expectedVisitors,
+      congestionLevel,
+      sourceIssueId,
+      isSimulation = false
+    } = req.body
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ message: 'Incident title is required' })
+    }
+
+    let coords = location?.coordinates
+    if (!coords && latitude !== undefined && longitude !== undefined) {
+      coords = [Number(longitude), Number(latitude)]
+    }
+    if (!coords || isNaN(coords[0]) || isNaN(coords[1])) {
+      return res.status(400).json({ message: 'Valid geographical coordinates (latitude and longitude) are required' })
+    }
+
+    const [lng, lat] = coords
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({ message: 'Coordinates are outside valid geographical bounds (-90 to 90 lat, -180 to 180 lng)' })
+    }
+
+    const incidentId = `INC-${Math.floor(1000 + Math.random() * 8999)}`
+    const incident = await Incident.create({
+      incidentId,
+      type,
+      title: title.trim(),
+      description: description || `Reported ${type.replaceAll('_', ' ').toLowerCase()} affecting traffic.`,
+      roadName: roadName || title.trim(),
+      location: { type: 'Point', coordinates: [lng, lat] },
+      severity,
+      status,
+      radius: Number(radius) || 350,
+      startTime: startTime || new Date(),
+      endTime: endTime || null,
+      createdBy: req.user.id,
+      eventName,
+      expectedVisitors: expectedVisitors ? Number(expectedVisitors) : undefined,
+      congestionLevel,
+      sourceIssueId,
+      isSimulation
+    })
+
+    io.emit('incident:created', incident)
+
+    // Broadcast immediate alert to citizens if CRITICAL or HIGH severity
+    if (status === 'ACTIVE' && (severity === 'CRITICAL' || severity === 'HIGH')) {
+      io.emit('incident:alert', {
+        title: `⚠️ ${type.replaceAll('_', ' ')}: ${incident.title}`,
+        message: `${incident.roadName} is currently affected. Dynamic routing is redirecting traffic.`,
+        incidentId: incident.incidentId,
+        severity: incident.severity
+      })
+    }
+
+    res.status(201).json(incident)
+  } catch (error) { next(error) }
+})
+
+// Update Road Incident (Authority/Admin only)
+app.put('/api/incidents/:id', auth, async (req, res, next) => {
+  try {
+    if (!['AUTHORITY', 'ADMIN'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Authority access required' })
+    }
+    const updateData = { ...req.body }
+    if (req.body.latitude !== undefined && req.body.longitude !== undefined) {
+      const lat = Number(req.body.latitude)
+      const lng = Number(req.body.longitude)
+      if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return res.status(400).json({ message: 'Invalid coordinate values' })
+      }
+      updateData.location = { type: 'Point', coordinates: [lng, lat] }
+    }
+    const incident = await Incident.findByIdAndUpdate(req.params.id, updateData, { new: true })
+    if (!incident) return res.status(404).json({ message: 'Incident not found' })
+    io.emit('incident:updated', incident)
+    res.json(incident)
+  } catch (error) { next(error) }
+})
+
+// Activate / Deactivate / Resolve Status Toggle
+app.patch('/api/incidents/:id/status', auth, async (req, res, next) => {
+  try {
+    if (!['AUTHORITY', 'ADMIN'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Authority access required' })
+    }
+    const { status } = req.body
+    if (!['ACTIVE', 'RESOLVED', 'SCHEDULED'].includes(status)) {
+      return res.status(400).json({ message: 'Status must be ACTIVE, RESOLVED, or SCHEDULED' })
+    }
+    const update = { status }
+    if (status === 'RESOLVED') {
+      update.endTime = new Date()
+    }
+    const incident = await Incident.findByIdAndUpdate(req.params.id, { $set: update }, { new: true })
+    if (!incident) return res.status(404).json({ message: 'Incident not found' })
+    io.emit('incident:updated', incident)
+    res.json(incident)
+  } catch (error) { next(error) }
+})
+
+// Delete Road Incident
+app.delete('/api/incidents/:id', auth, async (req, res, next) => {
+  try {
+    if (!['AUTHORITY', 'ADMIN'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Authority access required' })
+    }
+    const incident = await Incident.findByIdAndDelete(req.params.id)
+    if (!incident) return res.status(404).json({ message: 'Incident not found' })
+    io.emit('incident:deleted', { id: req.params.id, incidentId: incident.incidentId })
+    res.json({ message: 'Incident deleted successfully', id: req.params.id })
+  } catch (error) { next(error) }
+})
+
+// Quick Hackathon Scenario Simulation Triggers
+app.post('/api/incidents/simulate', auth, async (req, res, next) => {
+  try {
+    const { scenario } = req.body // 'WARDHA_CLOSURE' | 'MANISH_NAGAR_FLOOD' | 'DEEKSHABHOOMI_EVENT' | 'RESET'
+
+    if (scenario === 'RESET') {
+      await Incident.deleteMany({ isSimulation: true })
+      const active = await Incident.find({ status: 'ACTIVE' })
+      io.emit('incidents:reset', active)
+      return res.json({ message: 'Simulation scenarios reset successfully' })
+    }
+
+    if (scenario === 'WARDHA_CLOSURE') {
+      await Incident.deleteMany({ title: /Wardha Flyover/i })
+      const inc = await Incident.create({
+        incidentId: 'INC-SIM-01',
+        type: 'ROAD_CLOSURE',
+        title: 'Wardha Flyover Closed for Structural Repair',
+        description: 'Precautionary closure for flyover joint repair. Main carriageway blocked between Ajni and Chhatrapati Square.',
+        roadName: 'Wardha Road Flyover Corridor',
+        location: { type: 'Point', coordinates: [79.0750, 21.1120] },
+        severity: 'CRITICAL',
+        status: 'ACTIVE',
+        radius: 450,
+        startTime: new Date(),
+        createdBy: req.user?.id,
+        isSimulation: true
+      })
+      io.emit('incident:created', inc)
+      return res.json({ message: 'Scenario 1 (Wardha Flyover Closure) activated', incident: inc })
+    }
+
+    if (scenario === 'MANISH_NAGAR_FLOOD') {
+      await Incident.deleteMany({ title: /Manish Nagar/i })
+      const inc = await Incident.create({
+        incidentId: 'INC-SIM-02',
+        type: 'FLOODED_ROAD',
+        title: 'Manish Nagar Underpass Flooded / Impassable',
+        description: 'Severe monsoon waterlogging reaching 2.5ft depth. Underpass completely impassable for vehicles.',
+        roadName: 'Manish Nagar Railway Underpass Road',
+        location: { type: 'Point', coordinates: [79.0815, 21.0995] },
+        severity: 'HIGH',
+        status: 'ACTIVE',
+        radius: 380,
+        startTime: new Date(),
+        createdBy: req.user?.id,
+        isSimulation: true
+      })
+      io.emit('incident:created', inc)
+      return res.json({ message: 'Scenario 2 (Manish Nagar Flooded Road) activated', incident: inc })
+    }
+
+    if (scenario === 'DEEKSHABHOOMI_EVENT') {
+      await Incident.deleteMany({ title: /Deekshabhoomi/i })
+      const inc = await Incident.create({
+        incidentId: 'INC-SIM-03',
+        type: 'EVENT_CONGESTION',
+        title: 'Mega Gathering & Festival at Deekshabhoomi',
+        description: 'Large civic gathering with high pedestrian density. Perimeter roads restricted to pedestrian and shuttle transit.',
+        roadName: 'Deekshabhoomi Perimeter & South Ambazari Road',
+        location: { type: 'Point', coordinates: [79.0689, 21.1278] },
+        severity: 'HIGH',
+        status: 'ACTIVE',
+        radius: 800,
+        startTime: new Date(),
+        eventName: 'Annual Deekshabhoomi Gathering',
+        expectedVisitors: 25000,
+        congestionLevel: 'HIGH',
+        createdBy: req.user?.id,
+        isSimulation: true
+      })
+      io.emit('incident:created', inc)
+      return res.json({ message: 'Scenario 3 (Mega Event Congestion) activated', incident: inc })
+    }
+
+    res.status(400).json({ message: 'Unknown simulation scenario' })
+  } catch (error) { next(error) }
+})
+
+// Parking Guidance Routes
+app.get('/api/parkings', async (req, res, next) => {
+  try {
+    const parkings = await Parking.find().sort({ availableSpaces: -1 })
+    res.json(parkings)
+  } catch (error) { next(error) }
+})
+
+app.post('/api/parkings', auth, async (req, res, next) => {
+  try {
+    if (!['AUTHORITY', 'ADMIN'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Authority access required' })
+    }
+    const { name, location, address, capacity = 200, availableSpaces = 50, nearLandmark } = req.body
+    const parkingId = `PRK-${Math.floor(1000 + Math.random() * 8999)}`
+    const parking = await Parking.create({
+      parkingId,
+      name,
+      location: location || { type: 'Point', coordinates: [79.068, 21.127] },
+      address,
+      capacity: Number(capacity) || 200,
+      availableSpaces: Number(availableSpaces) || 50,
+      status: Number(availableSpaces) <= 0 ? 'FULL' : 'OPEN',
+      nearLandmark
+    })
+    res.status(201).json(parking)
+  } catch (error) { next(error) }
+})
+
+// Backend Incident-Aware Route Evaluation Endpoint
+app.post('/api/routes/calculate', async (req, res, next) => {
+  try {
+    const { start, destination, emergencyMode = false } = req.body
+    if (!start || !destination) {
+      return res.status(400).json({ message: 'Start and destination parameters are required' })
+    }
+
+    const sLat = Number(start.lat)
+    const sLng = Number(start.lng)
+    const dLat = Number(destination.lat)
+    const dLng = Number(destination.lng)
+
+    const activeIncidents = await Incident.find({ status: 'ACTIVE' })
+    const parkings = await Parking.find()
+
+    // Identify affected incidents intersecting the route corridor
+    const affected = []
+    for (const inc of activeIncidents) {
+      const [incLng, incLat] = inc.location?.coordinates || []
+      if (incLat && incLng) {
+        // Approximate point to route segment distance
+        const midLng = (sLng + dLng) / 2
+        const midLat = (sLat + dLat) / 2
+        const d1 = distanceMeters(sLng, sLat, incLng, incLat)
+        const d2 = distanceMeters(dLng, dLat, incLng, incLat)
+        const dMid = distanceMeters(midLng, midLat, incLng, incLat)
+        const minDistance = Math.min(d1, d2, dMid)
+
+        if (minDistance <= (inc.radius || 350) * 1.5) {
+          affected.push(inc)
+        }
+      }
+    }
+
+    res.json({
+      start: { lat: sLat, lng: sLng, name: start.name },
+      destination: { lat: dLat, lng: dLng, name: destination.name },
+      isAffected: affected.length > 0,
+      affectedIncidents: affected,
+      emergencyMode,
+      parkings
+    })
+  } catch (error) { next(error) }
+})
+
 // Notifications
 app.get('/api/notifications', auth, async (req, res, next) => {
   try {
@@ -719,6 +1091,8 @@ mongoose.connect(mongoUri)
     try {
       await Issue.createIndexes()
       await RecentWork.createIndexes()
+      await Incident.createIndexes()
+      await Parking.createIndexes()
       console.log('2dsphere geospatial indexes ensured.')
     } catch (e) {
       console.warn('Index notice:', e.message)
