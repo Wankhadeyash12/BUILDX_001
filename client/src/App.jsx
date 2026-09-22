@@ -1,15 +1,17 @@
 import { useEffect, useState, useMemo } from 'react'
 import {
-  Activity, AlertCircle, AlertTriangle, ArrowUpRight, Bell, Camera, Check, CheckCircle2,
-  ChevronRight, CircleHelp, ClipboardCheck, Clock, Eye, FilePlus2, Filter, Home,
-  Layers, LocateFixed, LogOut, MapPin, Menu, MoreHorizontal, Navigation, Plus,
-  Radar, Search, ShieldAlert, ShieldCheck, Sparkles, TrendingUp, Upload,
-  UserPlus, UserRound, Users, Wrench, X
+  Activity, AlertCircle, AlertOctagon, AlertTriangle, ArrowRight, ArrowUpRight, Bell, Camera, Check, CheckCircle2,
+  ChevronRight, CircleHelp, ClipboardCheck, Clock, Compass, Eye, FilePlus2, Filter, Home,
+  Layers, LocateFixed, LogOut, MapPin, Menu, MoreHorizontal, Navigation, ParkingCircle, Plus,
+  Radar, RefreshCw, Search, ShieldAlert, ShieldCheck, Siren, Sparkles, TrendingUp, Upload,
+  UserPlus, UserRound, Users, Wrench, X, Zap
 } from 'lucide-react'
-import { CircleMarker, MapContainer, Popup, TileLayer, ZoomControl, useMap } from 'react-leaflet'
+import { Circle, CircleMarker, MapContainer, Polyline, Popup, TileLayer, ZoomControl, useMap } from 'react-leaflet'
 import { io } from 'socket.io-client'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
+import { IncidentManagement, IncidentFormModal } from './IncidentManagement'
+import { CitizenRoutePlanner } from './CitizenRoutePlanner'
 
 const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? 'https://team219c61.onrender.com' : '')
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || (import.meta.env.PROD ? 'https://team219c61.onrender.com' : window.location.origin)
@@ -72,6 +74,11 @@ function App() {
   const [authMode, setAuthMode] = useState('login')
   const [issues, setIssues] = useState([])
   const [recentWorks, setRecentWorks] = useState([])
+  const [incidents, setIncidents] = useState([])
+  const [parkings, setParkings] = useState([])
+  const [currentRoute, setCurrentRoute] = useState(null)
+  const [showConvertModal, setShowConvertModal] = useState(false)
+  const [issueToConvert, setIssueToConvert] = useState(null)
   const [selectedScenarioFilter, setSelectedScenarioFilter] = useState(null)
   const [previewIssue, setPreviewIssue] = useState(null)
 
@@ -102,9 +109,36 @@ function App() {
       .catch(() => {})
   }
 
+  // Load Dynamic Road Incidents
+  const refreshIncidents = () => {
+    const endpoint = (currentUser?.role === 'AUTHORITY' || currentUser?.role === 'ADMIN')
+      ? '/api/incidents'
+      : '/api/incidents/active'
+    fetch(apiUrl(endpoint), {
+      headers: currentUser?.token ? { Authorization: `Bearer ${currentUser.token}` } : {}
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data) => {
+        if (data) setIncidents(data)
+      })
+      .catch(() => {})
+  }
+
+  // Load Event Parkings
+  const refreshParkings = () => {
+    fetch(apiUrl('/api/parkings'))
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data) => {
+        if (data) setParkings(data)
+      })
+      .catch(() => {})
+  }
+
   useEffect(() => {
     refreshIssues()
     refreshRecentWorks()
+    refreshIncidents()
+    refreshParkings()
   }, [currentUser])
 
   // Live Socket.IO Updates
@@ -121,11 +155,31 @@ function App() {
     }
     socket.on('issue:created', (record) => {
       syncIssue(record)
-      notify(`New Incident Reported: ${record.issueId} (${record.category})`)
+      notify(`New Grievance Reported: ${record.issueId} (${record.category})`)
     })
     socket.on('issue:updated', (record) => {
       syncIssue(record)
     })
+
+    // Dynamic Incident Socket Listeners
+    socket.on('incident:created', (inc) => {
+      setIncidents((cur) => [inc, ...cur.filter((i) => (i._id || i.id) !== (inc._id || inc.id))])
+      notify(`⚠️ Road Alert: ${inc.title}`)
+    })
+    socket.on('incident:updated', (inc) => {
+      setIncidents((cur) => cur.map((i) => ((i._id || i.id) === (inc._id || inc.id) ? inc : i)))
+    })
+    socket.on('incident:deleted', (data) => {
+      setIncidents((cur) => cur.filter((i) => (i._id || i.id) !== data.id && i.incidentId !== data.incidentId))
+    })
+    socket.on('incident:alert', (alert) => {
+      notify(`${alert.title} — ${alert.message}`)
+      refreshIncidents()
+    })
+    socket.on('incidents:reset', () => {
+      refreshIncidents()
+    })
+
     return () => socket.disconnect()
   }, [])
 
@@ -236,6 +290,11 @@ function App() {
         user={currentUser}
         issues={issues}
         recentWorks={recentWorks}
+        incidents={incidents}
+        parkings={parkings}
+        refreshIncidents={refreshIncidents}
+        refreshParkings={refreshParkings}
+        notify={notify}
         setIssues={setIssues}
         refreshIssues={refreshIssues}
         onLogout={() => {
@@ -249,6 +308,7 @@ function App() {
   const navItems = [
     ['Overview', Home],
     ['Live map', Navigation],
+    ['Plan route', Compass],
     ['My reports', FilePlus2],
     ['Analytics', Activity]
   ]
@@ -258,6 +318,7 @@ function App() {
   const openIssuesCount = issues.filter((i) => i.status !== 'Resolved').length
   const resolvedIssuesCount = issues.filter((i) => i.status === 'Resolved').length
   const resolutionRate = issues.length ? Math.round((resolvedIssuesCount / issues.length) * 100) : 0
+  const activeIncidentsCount = incidents.filter((i) => i.status === 'ACTIVE').length
 
   return (
     <div className="app-shell">
@@ -280,6 +341,9 @@ function App() {
               <Icon size={18} />
               <span>{label}</span>
               {label === 'My reports' && <b>{myReportsCount || issues.length}</b>}
+              {label === 'Plan route' && activeIncidentsCount > 0 && (
+                <b className="badge-coral">{activeIncidentsCount}</b>
+              )}
             </button>
           ))}
         </nav>
@@ -411,10 +475,32 @@ function App() {
                 </button>
               </section>
 
-              {/* Real computed statistics (Task 7) */}
+              {/* Dynamic Road Closure & Incident Alert Banner */}
+              {incidents.some((i) => i.status === 'ACTIVE' && (i.severity === 'CRITICAL' || i.type === 'ROAD_CLOSURE')) && (
+                <div className="incident-alert-banner" onClick={() => setActiveNav('Plan route')}>
+                  <AlertOctagon size={22} className="alert-pulse" />
+                  <div className="alert-banner-text">
+                    <strong>
+                      ACTIVE ROAD CLOSURE: {incidents.find((i) => i.status === 'ACTIVE' && (i.severity === 'CRITICAL' || i.type === 'ROAD_CLOSURE'))?.title}
+                    </strong>
+                    <span>Dynamic routing is actively detouring traffic around affected corridors. Click to plan safe route.</span>
+                  </div>
+                  <button className="banner-nav-btn">
+                    Plan Safe Route <ArrowRight size={14} />
+                  </button>
+                </div>
+              )}
+
+              {/* Real computed statistics */}
               <section className="stat-grid">
-                <Stat label="Total Incidents Tracked" value={issues.length} note="Live MongoDB records" icon={FilePlus2} tone="blue" />
-                <Stat label="Open / In Progress" value={openIssuesCount} note="Active field work orders" icon={AlertCircle} tone="coral" />
+                <Stat label="Total Incidents" value={issues.length} note="Live MongoDB records" icon={FilePlus2} tone="blue" />
+                <Stat
+                  label="Road Disruptions"
+                  value={activeIncidentsCount}
+                  note="Closures, Floods & Events"
+                  icon={AlertOctagon}
+                  tone={activeIncidentsCount > 0 ? 'coral' : 'blue'}
+                />
                 <Stat label="Active Moratoriums" value={recentWorks.filter(w => w.moratoriumUntil && new Date(w.moratoriumUntil) > new Date()).length || 1} note="Protected resurfaced roads" icon={Wrench} tone="gold" />
                 <Stat label="Verified Resolved" value={resolvedIssuesCount} note="Dual-photo sign-offs" icon={ShieldCheck} tone="mint" />
               </section>
@@ -422,7 +508,7 @@ function App() {
               <section className="section-head">
                 <div>
                   <h2>Live Infrastructure GIS Map</h2>
-                  <p>Real-time geolocated road hazards and active utility works</p>
+                  <p>Real-time geolocated road hazards, active utility works & road disruptions</p>
                 </div>
                 <div className="head-actions">
                   <button className="text-button" onClick={() => setActiveNav('Live map')}>
@@ -444,6 +530,8 @@ function App() {
                   <CivicMap
                     issues={filteredIssues}
                     recentWorks={recentWorks}
+                    incidents={incidents.filter((i) => i.status === 'ACTIVE')}
+                    parkings={parkings}
                     onSelect={(issue) => setPreviewIssue(issue)}
                   />
                 </div>
@@ -515,10 +603,45 @@ function App() {
             <CitizenLiveMap
               issues={filteredIssues}
               recentWorks={recentWorks}
+              incidents={incidents.filter((i) => i.status === 'ACTIVE')}
+              parkings={parkings}
               notify={notify}
               onReport={() => setShowReport(true)}
               onSelectIssue={(issue) => setPreviewIssue(issue)}
             />
+          )}
+
+          {/* Dynamic Incident-Aware Routing Workspace */}
+          {activeNav === 'Plan route' && (
+            <div className="citizen-routing-workspace">
+              <CitizenRoutePlanner
+                incidents={incidents}
+                parkings={parkings}
+                notify={notify}
+                onRouteCalculated={(route) => setCurrentRoute(route)}
+                currentRoute={currentRoute}
+              />
+              <div className="planner-map-card">
+                <div className="map-toolbar">
+                  <div className="map-location">
+                    <Compass size={15} />
+                    <span>Dynamic Incident-Aware Route Surface</span>
+                  </div>
+                  <span className="map-live"><i /> Real-time Corridor Sync</span>
+                </div>
+                <CivicMap
+                  issues={[]}
+                  recentWorks={recentWorks}
+                  incidents={incidents.filter((i) => i.status === 'ACTIVE')}
+                  parkings={parkings}
+                  activeRoute={currentRoute?.recommendedRoute?.polyline}
+                  blockedRoute={currentRoute?.blockedRoute}
+                  startPin={currentRoute?.start}
+                  destPin={currentRoute?.destination}
+                  large
+                />
+              </div>
+            </div>
           )}
 
           {activeNav === 'My reports' && (
@@ -576,10 +699,24 @@ function Stat({ label, value, note, icon: Icon, tone }) {
   )
 }
 
-// Interactive Map with Tasks 4 & 5 (SLA Overdue, Recent Works Overlay & Moratoriums)
-function CivicMap({ issues, recentWorks = [], onSelect, large = false }) {
-  const [center, setCenter] = useState([21.1458, 79.0882])
+// Interactive Map with Tasks 4 & 5 + Dynamic Incident-Aware Routing & Parking
+function CivicMap({
+  issues = [],
+  recentWorks = [],
+  incidents = [],
+  parkings = [],
+  activeRoute = null,
+  blockedRoute = null,
+  startPin = null,
+  destPin = null,
+  onSelect,
+  onSelectIncident,
+  large = false
+}) {
+  const [center, setCenter] = useState([21.1278, 79.0750])
   const [showWorksLayer, setShowWorksLayer] = useState(true)
+  const [showIncidentsLayer, setShowIncidentsLayer] = useState(true)
+  const [showParkingsLayer, setShowParkingsLayer] = useState(true)
 
   const locate = () => {
     navigator.geolocation?.getCurrentPosition(({ coords }) => setCenter([coords.latitude, coords.longitude]))
@@ -593,8 +730,24 @@ function CivicMap({ issues, recentWorks = [], onSelect, large = false }) {
           onClick={() => setShowWorksLayer(!showWorksLayer)}
           title="Toggle Excavations & Moratoriums"
         >
-          <Layers size={14} /> {showWorksLayer ? 'Hide Works Overlay' : 'Show Excavation & Moratorium Layer'}
+          <Layers size={14} /> {showWorksLayer ? 'Hide Works' : 'Show Works'}
         </button>
+        <button
+          className={showIncidentsLayer ? 'layer-btn active' : 'layer-btn'}
+          onClick={() => setShowIncidentsLayer(!showIncidentsLayer)}
+          title="Toggle Active Road Incidents & Closures"
+        >
+          <ShieldAlert size={14} /> {showIncidentsLayer ? 'Hide Road Closures' : 'Show Road Closures'}
+        </button>
+        {parkings && parkings.length > 0 && (
+          <button
+            className={showParkingsLayer ? 'layer-btn active' : 'layer-btn'}
+            onClick={() => setShowParkingsLayer(!showParkingsLayer)}
+            title="Toggle Event Parking Locations"
+          >
+            <ParkingCircle size={14} /> {showParkingsLayer ? 'Hide Parking' : 'Show Event Parking'}
+          </button>
+        )}
       </div>
 
       <MapContainer center={center} zoom={13} scrollWheelZoom zoomControl={false} className="leaflet-map">
@@ -643,6 +796,150 @@ function CivicMap({ issues, recentWorks = [], onSelect, large = false }) {
             )
           })}
 
+        {/* Dynamic Incidents & Hazard Zones Overlay */}
+        {showIncidentsLayer &&
+          incidents.map((inc) => {
+            const [lng, lat] = inc.location?.coordinates || [inc.longitude, inc.latitude]
+            if (!lat || !lng) return null
+            const isClosure = inc.type === 'ROAD_CLOSURE'
+            const isFlood = inc.type === 'FLOODED_ROAD'
+            const isEvent = inc.type === 'EVENT_CONGESTION'
+            const circleColor = isClosure ? '#dc2626' : isFlood ? '#0284c7' : isEvent ? '#9333ea' : '#ea580c'
+            const fillColor = isClosure ? '#ef4444' : isFlood ? '#38bdf8' : isEvent ? '#c084fc' : '#fb923c'
+
+            return (
+              <span key={`inc-group-${inc._id || inc.incidentId}`}>
+                {/* Affected Area / Hazard Radius Circle */}
+                <Circle
+                  center={[lat, lng]}
+                  radius={inc.radius || 350}
+                  pathOptions={{
+                    color: circleColor,
+                    weight: 2,
+                    dashArray: '6, 6',
+                    fillColor,
+                    fillOpacity: isEvent ? 0.22 : 0.16
+                  }}
+                />
+                {/* Center Incident Marker */}
+                <CircleMarker
+                  center={[lat, lng]}
+                  radius={14}
+                  pathOptions={{
+                    color: '#ffffff',
+                    weight: 3,
+                    fillColor: circleColor,
+                    fillOpacity: 1
+                  }}
+                  eventHandlers={{ click: () => onSelectIncident?.(inc) }}
+                >
+                  <Popup>
+                    <div className="popup-card incident-popup-card">
+                      <span className={`popup-badge ${isClosure ? 'closure' : isFlood ? 'flood' : isEvent ? 'event' : 'accident'}`}>
+                        {isClosure ? '🚧 Road Closure' : isFlood ? '🌊 Flooded Road' : isEvent ? '🎪 Mega Event' : '⚠️ Road Blockage'}
+                      </span>
+                      <strong>{inc.title}</strong>
+                      <p><MapPin size={12} /> {inc.roadName || inc.title}</p>
+                      {inc.description && <p className="popup-desc">{inc.description}</p>}
+                      <div className="popup-tags">
+                        <span className={`tag-status ${inc.status?.toLowerCase()}`}>{inc.status}</span>
+                        <span className="tag-overdue">{inc.severity} Severity</span>
+                        <span className="tag-cluster">{inc.radius || 350}m Radius</span>
+                      </div>
+                      {inc.eventName && (
+                        <div className="popup-event-meta">
+                          <span>Event: <b>{inc.eventName}</b></span>
+                          <span>Expected: <b>{inc.expectedVisitors?.toLocaleString()}</b></span>
+                        </div>
+                      )}
+                      {inc.endTime && (
+                        <small>Active until: {new Date(inc.endTime).toLocaleDateString()}</small>
+                      )}
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              </span>
+            )
+          })}
+
+        {/* Event Parking Guidance Overlay */}
+        {showParkingsLayer &&
+          parkings.map((p) => {
+            const [lng, lat] = p.location?.coordinates || [79.068, 21.127]
+            return (
+              <CircleMarker
+                key={`prk-${p._id || p.parkingId}`}
+                center={[lat, lng]}
+                radius={11}
+                pathOptions={{
+                  color: '#ffffff',
+                  weight: 2,
+                  fillColor: '#2563eb',
+                  fillOpacity: 0.95
+                }}
+              >
+                <Popup>
+                  <div className="popup-card parking-popup-card">
+                    <span className="popup-badge parking">🅿️ Event Parking</span>
+                    <strong>{p.name}</strong>
+                    <p>{p.address}</p>
+                    <div className="popup-tags">
+                      <span className="tag-cluster">Available: {p.availableSpaces} / {p.capacity}</span>
+                      <span className={`tag-status ${p.status?.toLowerCase()}`}>{p.status}</span>
+                    </div>
+                  </div>
+                </Popup>
+              </CircleMarker>
+            )
+          })}
+
+        {/* Blocked / Avoided Route Polyline (Dashed Red) */}
+        {blockedRoute && (
+          <Polyline
+            positions={blockedRoute}
+            pathOptions={{
+              color: '#dc2626',
+              weight: 5,
+              dashArray: '8, 8',
+              opacity: 0.85
+            }}
+          />
+        )}
+
+        {/* Recommended Safe Alternative Route Polyline (Solid Blue) */}
+        {activeRoute && (
+          <Polyline
+            positions={activeRoute}
+            pathOptions={{
+              color: '#2563eb',
+              weight: 6,
+              opacity: 0.92
+            }}
+          />
+        )}
+
+        {/* Origin Marker */}
+        {startPin && (
+          <CircleMarker
+            center={[startPin.lat, startPin.lng]}
+            radius={10}
+            pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#10b981', fillOpacity: 1 }}
+          >
+            <Popup><b>Origin:</b> {startPin.name}</Popup>
+          </CircleMarker>
+        )}
+
+        {/* Destination Marker */}
+        {destPin && (
+          <CircleMarker
+            center={[destPin.lat, destPin.lng]}
+            radius={10}
+            pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 }}
+          >
+            <Popup><b>Destination:</b> {destPin.name}</Popup>
+          </CircleMarker>
+        )}
+
         {/* Issues Markers */}
         {issues.map((issue) => (
           <CircleMarker
@@ -664,7 +961,7 @@ function CivicMap({ issues, recentWorks = [], onSelect, large = false }) {
                   : '#d79b32',
               fillOpacity: 1
             }}
-            eventHandlers={{ click: () => onSelect(issue) }}
+            eventHandlers={{ click: () => onSelect?.(issue) }}
           >
             <Popup>
               <div className="popup-card">
@@ -692,11 +989,12 @@ function CivicMap({ issues, recentWorks = [], onSelect, large = false }) {
       </button>
 
       <div className="leaflet-legend">
-        <span><i className="dot coral" /> Critical (School / Crash Risk)</span>
-        <span><i className="dot aqua" /> High</span>
-        <span><i className="dot mint" /> Resolved</span>
-        <span><i className="dot purple" /> Digging Moratorium</span>
-        <span><i className="dot orange" /> Active Excavation</span>
+        <span><i className="dot red" /> Road Closure</span>
+        <span><i className="dot blue" /> Flooded Road</span>
+        <span><i className="dot purple" /> Event Zone</span>
+        <span><i className="dot coral" /> Critical Issue</span>
+        <span><i className="dot mint" /> Clear Route / Resolved</span>
+        <span><i className="dot blue-dark" /> Parking Hub</span>
       </div>
     </div>
   )
@@ -713,7 +1011,7 @@ function MapSizeFix() {
   return null
 }
 
-function CitizenLiveMap({ issues, recentWorks, notify, onReport, onSelectIssue }) {
+function CitizenLiveMap({ issues, recentWorks, incidents = [], parkings = [], notify, onReport, onSelectIssue }) {
   return (
     <>
       <section className="welcome-row">
@@ -736,7 +1034,14 @@ function CitizenLiveMap({ issues, recentWorks, notify, onReport, onSelectIssue }
             </div>
             <span className="map-live"><i /> Real-time active</span>
           </div>
-          <CivicMap issues={issues} recentWorks={recentWorks} onSelect={onSelectIssue} large />
+          <CivicMap
+            issues={issues}
+            recentWorks={recentWorks}
+            incidents={incidents}
+            parkings={parkings}
+            onSelect={onSelectIssue}
+            large
+          />
         </div>
         <div className="nearby-list">
           <div className="list-head">
@@ -1326,8 +1631,20 @@ function IssueInspectionModal({ issue, onClose, onConfirmResolution }) {
   )
 }
 
-// Tasks 4, 5, 6: Authority Executive Dashboard & Command Center
-function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssues, onLogout }) {
+// Tasks 4, 5, 6 + Dynamic Incident-Aware Routing: Authority Command Center
+function AuthorityDashboard({
+  user,
+  issues,
+  recentWorks,
+  incidents = [],
+  parkings = [],
+  refreshIncidents,
+  refreshParkings,
+  notify,
+  setIssues,
+  refreshIssues,
+  onLogout
+}) {
   const [activeSection, setActiveSection] = useState('Overview')
   const [filter, setFilter] = useState('All issues')
   const [selected, setSelected] = useState(null)
@@ -1338,6 +1655,8 @@ function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssue
   const [reRouteDept, setReRouteDept] = useState('')
   const [showReRoute, setShowReRoute] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+  const [issueToConvert, setIssueToConvert] = useState(null)
+  const [showConvertModal, setShowConvertModal] = useState(false)
 
   useEffect(() => {
     if (user.token) {
@@ -1428,6 +1747,7 @@ function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssue
   }
 
   const overdueCount = issues.filter((i) => i.isOverdue).length
+  const activeIncidentsCount = incidents.filter((i) => i.status === 'ACTIVE').length
 
   return (
     <div className="authority-shell">
@@ -1443,6 +1763,14 @@ function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssue
             onClick={() => setActiveSection('Overview')}
           >
             <Activity size={18} /><span>Command Center</span>
+          </button>
+          <button
+            className={activeSection === 'Incident management' ? 'nav-item active' : 'nav-item'}
+            onClick={() => setActiveSection('Incident management')}
+          >
+            <AlertOctagon size={18} />
+            <span>Incident Management</span>
+            {activeIncidentsCount > 0 && <b className="badge-coral">{activeIncidentsCount}</b>}
           </button>
           <button
             className={activeSection === 'Priority queue' ? 'nav-item active' : 'nav-item'}
@@ -1632,9 +1960,26 @@ function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssue
             </div>
           )}
 
+          {activeSection === 'Incident management' && (
+            <IncidentManagement
+              user={user}
+              incidents={incidents}
+              refreshIncidents={refreshIncidents}
+              notify={notify}
+              onViewOnMap={() => setActiveSection('Live map')}
+            />
+          )}
+
           {activeSection === 'Live map' && (
             <div className="authority-workspace">
-              <CivicMap issues={issues} recentWorks={recentWorks} onSelect={(issue) => setSelected(issue)} large />
+              <CivicMap
+                issues={issues}
+                recentWorks={recentWorks}
+                incidents={incidents}
+                parkings={parkings}
+                onSelect={(issue) => setSelected(issue)}
+                large
+              />
             </div>
           )}
 
@@ -1805,6 +2150,33 @@ function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssue
 
             {errorMsg && <div className="auth-error">{errorMsg}</div>}
 
+            <div className="convert-incident-action">
+              <button
+                type="button"
+                className="secondary-button convert-btn"
+                onClick={() => {
+                  setIssueToConvert({
+                    type: ['POTHOLE', 'ROAD_DAMAGE'].includes(selected.category)
+                      ? 'ROAD_CLOSURE'
+                      : selected.category === 'WATER_LEAKAGE'
+                      ? 'FLOODED_ROAD'
+                      : 'ROAD_CLOSURE',
+                    title: `Road Hazard at ${selected.area}`,
+                    roadName: selected.area,
+                    description: `Converted from citizen report ${selected.id}: ${selected.description || selected.title}`,
+                    severity: selected.severity || 'HIGH',
+                    status: 'ACTIVE',
+                    radius: 350,
+                    location: selected.location || { coordinates: [selected.longitude, selected.latitude] },
+                    sourceIssueId: selected._id
+                  })
+                  setShowConvertModal(true)
+                }}
+              >
+                <AlertOctagon size={15} /> Elevate / Convert to Road Incident
+              </button>
+            </div>
+
             <div className="modal-actions">
               <button className="secondary-button" onClick={() => setSelected(null)}>Close</button>
               <button
@@ -1816,6 +2188,24 @@ function AuthorityDashboard({ user, issues, recentWorks, setIssues, refreshIssue
             </div>
           </div>
         </div>
+      )}
+
+      {/* Convert Issue to Incident Modal */}
+      {showConvertModal && issueToConvert && (
+        <IncidentFormModal
+          user={user}
+          incident={issueToConvert}
+          onClose={() => {
+            setShowConvertModal(false)
+            setIssueToConvert(null)
+          }}
+          onSaved={() => {
+            setShowConvertModal(false)
+            setIssueToConvert(null)
+            refreshIncidents()
+          }}
+          notify={notify}
+        />
       )}
     </div>
   )
