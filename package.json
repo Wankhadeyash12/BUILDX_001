@@ -1,0 +1,28 @@
+{
+  "name": "civicpulse",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "client": "npm --prefix client run dev",
+    "server": "node server/src/index.js",
+    "seed": "node server/src/seed.js",
+    "build": "npm install --prefix client --include=dev && npm --prefix client run build",
+    "start": "node server/src/index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.18.0",
+    "multer": "^2.0.2",
+    "socket.io": "^4.8.1",
+    "lucide-react": "^1.41.0",
+    "recharts": "^3.10.1"
+  },
+  "devDependencies": { "concurrently": "^9.2.1" }
+}
